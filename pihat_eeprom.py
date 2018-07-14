@@ -1,4 +1,3 @@
-import ctypes
 import io
 import struct
 from uuid import uuid4
@@ -48,7 +47,7 @@ def _set_bits(value, mask, bits):
     return (value & (~mask)) | ((bits << shift) & mask)
 
 
-class Struct(ctyles.LittleEndianStructure):
+class Struct(object):
     """
     Represents some data object that can parse data and be built back into a binary stream.
     """
