@@ -1,6 +1,7 @@
+import contextlib
 import io
 import struct
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import crcmod
 
@@ -134,10 +135,10 @@ class VendorInfoAtomData(Struct):
         uuid=None,
         product_id=0,
         product_version=0,
-        vendor_string=b"",
-        product_string=b"",
         vendor_slen=0,
         product_slen=0,
+        vendor_string=b"",
+        product_string=b"",
     ):
         if uuid is None:
             self.uuid = uuid4().bytes_le
@@ -155,15 +156,7 @@ class VendorInfoAtomData(Struct):
         uuid, pid, pver, vslen, pslen = _unpack(stream, 22, "<16sHHBB")
         vstr = _unpack(stream, vslen, "{}s".format(vslen))
         pstr = _unpack(stream, pslen, "{}s".format(pslen))
-        return cls(
-            uuid=uuid,
-            product_id=pid,
-            product_version=pver,
-            vendor_string=vstr,
-            product_string=pstr,
-            vendor_slen=vslen,
-            product_slen=pslen,
-        )
+        return cls(uuid, pid, pver, vslen, pslen, vstr, pstr)
 
     def build(self):
         self.vendor_slen = len(self.vendor_string)
@@ -182,33 +175,58 @@ class VendorInfoAtomData(Struct):
         )
 
 
-def _make_bitfield_property(attrname, bits, value_map):
-    value_map_rev = {v: k for k, v in value_map.items()}  # reversed
+class BitfieldProperty(object):
+    _get_raw = False
+    _set_raw = False
 
-    def _get(self):
-        attr = getattr(self, attrname)
-        val = _get_bits(attr, bits)
-        if not val in value_map_rev:
-            raise KeyError("invalid value: {}".format(val))
-        return value_map_rev[val]
+    def __init__(self, attrname, bits, kv_map):
+        self.attrname = attrname
+        self.bits = bits
+        self.key_to_value = kv_map
+        self.value_to_key = {v: k for k, v in kv_map.items()}
 
-    def _set(self, value):
-        attr = getattr(self, attrname)
-        if value not in value_map:
-            raise KeyError("invalid value: {}".format(value))
-        new_value = _set_bits(attr, bits, value_map[value])
-        setattr(self, attrname, new_value)
+    def __get__(self, obj, type=None):
+        attr = getattr(obj, self.attrname)
+        data = _get_bits(attr, self.bits)
+        if self._get_raw:
+            return data
+        else:
+            if not data in self.value_to_key:
+                raise KeyError("invalid value: {}".format(data))
+            return self.value_to_key[data]
 
-    return property(_get, _set)
+    def __set__(self, obj, option):
+        attr = getattr(obj, self.attrname)
+        if self._set_raw:
+            val = option
+        else:
+            if option not in self.key_to_value:
+                raise KeyError("invalid value: {}".format(option))
+            val = self.key_to_value[option]
+        new_value = _set_bits(attr, self.bits, val)
+        setattr(obj, self.attrname, new_value)
 
 
-class GPIOPin(Struct):
+class BitfieldMixin(object):
+    def get_raw(self, attr):
+        BitfieldProperty._get_raw = True
+        val = getattr(self, attr)
+        BitfieldProperty._get_raw = False
+        return val
+
+    def set_raw(self, attr, value):
+        BitfieldProperty._set_raw = True
+        setattr(self, attr, value)
+        BitfieldProperty._set_raw = False
+
+
+class GPIOPin(Struct, BitfieldMixin):
     """
     GPIO Pin
 
     Attributes are mapped to meaningful values.  Get or set attributes with this value.
 
-    `func_sel` can have the following values:
+    `funcion` can have the following values:
 
       - `input`
       - `output`
@@ -219,12 +237,12 @@ class GPIOPin(Struct):
       - `alt4`
       - `alt5`
 
-    `pulltype` can have the following values:
+    `pull` can have the following values:
 
       - `default`
-      - `pullup`
-      - `pulldown`
-      - `nopull`
+      - `up`
+      - `down`
+      - `none`
 
     `is_used` can have the following values:
 
@@ -233,7 +251,7 @@ class GPIOPin(Struct):
 
     """
 
-    _repr_attrs = ("func_sel", "pulltype", "is_used")
+    _repr_attrs = ("function", "pull", "is_used")
 
     def __init__(self, data):
         self.data = data
@@ -246,7 +264,7 @@ class GPIOPin(Struct):
     def build(self):
         return self.data.to_bytes(1, "little")
 
-    func_sel = _make_bitfield_property(
+    function = BitfieldProperty(
         "data",
         0x03,
         {
@@ -261,14 +279,14 @@ class GPIOPin(Struct):
         },
     )
 
-    pulltype = _make_bitfield_property(
-        "data", 0x60, {"default": 0, "pullup": 1, "pulldown": 2, "nopull": 3}
+    pull = BitfieldProperty(
+        "data", 0x60, {"default": 0, "up": 1, "down": 2, "none": 3}
     )
 
-    is_used = _make_bitfield_property("data", 0x80, {False: 0, True: 1})
+    is_used = BitfieldProperty("data", 0x80, {False: 0, True: 1})
 
 
-class GPIOMapAtomData(Struct):
+class GPIOMapAtomData(Struct, BitfieldMixin):
     """
     GPIO Map Atom Data
 
@@ -309,19 +327,19 @@ class GPIOMapAtomData(Struct):
         else:
             self.pins = pins
 
-    drive = _make_bitfield_property(
+    drive = BitfieldProperty(
         "bank_drive", 0x0f, {"default": 0, **{n: n for n in range(1, 9)}}
     )
 
-    slew = _make_bitfield_property(
+    slew = BitfieldProperty(
         "bank_drive", 0x30, {"default": 0, "enabled": 1, "disabled": 2}
     )
 
-    hysteresis = _make_bitfield_property(
+    hysteresis = BitfieldProperty(
         "bank_drive", 0xc0, {"default": 0, "enabled": 1, "disabled": 2}
     )
 
-    back_power = _make_bitfield_property(
+    back_power = BitfieldProperty(
         "power", 0x03, {"disabled": 0, "enabled_1.3A": 1, "enabled_2A": 2}
     )
 
@@ -369,6 +387,8 @@ class CustomDataAtomData(Struct):
         self.blob = blob
 
     @classmethod
+            oeturn setattr(self, attr, value)
+            returnterfacet setattr(self, attr, value)
     def parse(cls, stream, length):
         blob = _unpack(stream, length, "<{}s".format(length))
         return cls(blob)
@@ -412,15 +432,8 @@ class Atom(Struct):
         """
         return self.atom_types.get(self.type, (None, None))[0]
 
-    @property
-    def _data_raw(self):
-        if hasattr(self.data, "build"):
-            return self.data.build()
-        else:
-            return self.data
-
     @classmethod
-    def parse(cls, stream, length=None):
+    def parse(cls, stream):
         # First, unpack up to data length
         type_, count, dlen = _unpack(stream, 8, "<HHI")
 
@@ -439,14 +452,17 @@ class Atom(Struct):
         return cls(type_, count, dlen, data, crc)
 
     def build(self):
-        data_raw = self._data_raw
-        self.dlen = len(data_raw) + 2  # includes CRC
+        if hasattr(self.data, "build"):
+            data = self.data.build()
+        else:
+            data = self.data
+        self.dlen = len(data) + 2  # includes CRC
         data = struct.pack(
             "<HHI{dlen}s".format(dlen=self.dlen - 2),
             self.type,
             self.count,
             self.dlen,
-            data_raw,
+            data,
         )
         crc_func = crcmod.predefined.mkCrcFun("crc-16")
         self.crc = crc_func(data)
@@ -545,17 +561,64 @@ class EEPROM(Struct):
         self.update()
         return atom
 
+def eeprom_from_settings_file(string):
+    cmds = {}
+    for line in string.splitlines():
+        if not line or line.strip().startswith('#'):
+            continue
+        cmd, *val = line.strip().split()
+        if cmd == 'setgpio':
+            cmds.setdefault(cmd, []).append(val)
+        else:
+            cmds[cmd] = val
+
+    eep = EEPROM.create()
+    vinfo = eep.atoms_type['vendor_info']
+    gpio = eep.atoms_type['gpio_map']
+
+    val = cmds.get('product_uuid')
+    if val:
+        vinfo.data.uuid = UUID(val[0]).bytes
+    val = cmds.get('product_id')
+    if val:
+        vinfo.data.product_id = int(val[0], 16)
+    val = cmds.get('product_ver')
+    if val:
+        vinfo.data.product_version = int(val[0], 16)
+    val = cmds.get('vendor')
+    if val:
+        vinfo.data.vendor_string = val[0].strip('"').encode('ascii')
+    val = cmds.get('product')
+    if val:
+        vinfo.data.product_string = val[0].strip('"').encode('ascii')
+    val = cmds.get('gpio_drive')
+    if val:
+        gpio.data.set_raw('drive', int(val[0]))
+    val = cmds.get('gpio_slew')
+    if val:
+        gpio.data.set_raw('slew', int(val[0]))
+    val = cmds.get('gpio_hysteresis')
+    if val:
+        gpio.data.set_raw('hysteresis', int(val[0]))
+    val = cmds.get('back_power')
+    if val:
+        gpio.data.set_raw('back_power', int(val[0]))
+
+    val = cmds.get('setgpio')
+    if val:
+        for num, func, pull in val:
+            pin = gpio.data.pins[int(num)]
+            pin.function = func.lower()
+            pin.pull = pull.lower()
+            pin.is_used = True
+
+    return eep
+
+
 
 if __name__ == "__main__":
-    with open("eeprom.bin", "rb") as f:
-        eep = EEPROM.parse(f.read())
-
-    eep.atoms_type["vendor_info"].data.vendor_string = b"foo"
-    if not "custom_data" in eep.atoms_type:
-        eep.add_atom("custom_data", b"hello world")
-    eep.update()
-    with open("eeprom_new.bin", "wb") as f:
-        f.write(eep.build())
-
-    # eep = EEPROM.create()
-    # print(eep)
+    with open('eeprom_settings.txt', 'r') as f:
+        eep = eeprom_from_settings_file(f.read())
+    with open('eeprom_new.bin', 'wb') as ef:
+        ef.write(eep.build())
+    print(eep)
